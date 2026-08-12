@@ -14,52 +14,15 @@ param preAuthorizedClientIds string = ''
 @description('OAuth2 delegated permissions for App Service Authentication login flow')
 param delegatedPermissions array = ['User.Read']
 
-@description('Token exchange audience for sovereign cloud deployments (optional)')
-param tokenExchangeAudience string = ''
-
 @minLength(1)
 @description('Primary location for all resources & Flex Consumption Function App')
-@allowed([
-  'australiaeast'
-  'australiasoutheast'
-  'brazilsouth'
-  'canadacentral'
-  'centralindia'
-  'centralus'
-  'eastasia'
-  'eastus'
-  'eastus2'
-  'eastus2euap'
-  'francecentral'
-  'germanywestcentral'
-  'italynorth'
-  'japaneast'
-  'koreacentral'
-  'northcentralus'
-  'northeurope'
-  'norwayeast'
-  'southafricanorth'
-  'southcentralus'
-  'southeastasia'
-  'southindia'
-  'spaincentral'
-  'swedencentral'
-  'uaenorth'
-  'uksouth'
-  'ukwest'
-  'westcentralus'
-  'westeurope'
-  'westus'
-  'westus2'
-  'westus3'
-])
 @metadata({
   azd: {
     type: 'location'
   }
 })
 param location string
-param vnetEnabled bool = true // Enable VNet by default
+
 param mcpServiceName string = ''
 param apiUserAssignedIdentityName string = ''
 param applicationInsightsName string = ''
@@ -67,9 +30,6 @@ param appServicePlanName string = ''
 param logAnalyticsName string = ''
 param resourceGroupName string = ''
 param storageAccountName string = ''
-param vNetName string = ''
-@description('Id of the user identity to be used for testing and debugging. This is not required in production. Leave empty if not needed.')
-param principalId string = ''
 
 @description('Base URL of the Ghost site (e.g. https://yourblog.ghost.io)')
 param ghostApiUrl string
@@ -98,7 +58,6 @@ resource rg 'Microsoft.Resources/resourceGroups@2021-04-01' = {
 }
 
 // User assigned managed identity to be used by the MCP function app to reach storage and other dependencies
-// Assign specific roles to this identity in the RBAC module
 module mcpUserAssignedIdentity 'br/public:avm/res/managed-identity/user-assigned-identity:0.4.1' = {
   name: 'mcpUserAssignedIdentity'
   scope: rg
@@ -109,7 +68,7 @@ module mcpUserAssignedIdentity 'br/public:avm/res/managed-identity/user-assigned
   }
 }
 
-// Create an App Service Plan to group applications under the same payment plan and SKU
+// Create an App Service Plan (Flex Consumption)
 module appServicePlan 'br/public:avm/res/web/serverfarm:0.1.1' = {
   name: 'appserviceplan'
   scope: rg
@@ -166,18 +125,18 @@ module mcp './app/mcp.bicep' = {
       GHOST_ADMIN_API_KEY: ghostAdminApiKey
       GHOST_API_VERSION: ghostApiVersion
     }
-    virtualNetworkSubnetId: vnetEnabled ? serviceVirtualNetwork.outputs.appSubnetID : ''
-    // Authorization parameters
+    // No VNet integration - the Function App is publicly reachable over HTTPS.
+    // Security is enforced by Easy Auth (Microsoft Entra ID) on the MCP endpoint.
+    virtualNetworkSubnetId: ''
     authClientId: entraApp.outputs.applicationId
     authIdentifierUri: entraApp.outputs.identifierUri
     authExposedScopes: entraApp.outputs.exposedScopes
     authTenantId: tenant().tenantId
     delegatedPermissions: delegatedPermissions
-    tokenExchangeAudience: tokenExchangeAudience
   }
 }
 
-// Backing storage for Azure functions backend API
+// Backing storage for Azure Functions (public access, managed identity auth, no shared keys)
 module storage 'br/public:avm/res/storage/storage-account:0.8.3' = {
   name: 'storage'
   scope: rg
@@ -186,18 +145,15 @@ module storage 'br/public:avm/res/storage/storage-account:0.8.3' = {
     allowBlobPublicAccess: false
     allowSharedKeyAccess: false // Disable local authentication methods as per policy
     dnsEndpointType: 'Standard'
-    publicNetworkAccess: vnetEnabled ? 'Disabled' : 'Enabled'
-    networkAcls: vnetEnabled ? {
-      defaultAction: 'Deny'
-      bypass: 'None'
-    } : {
+    publicNetworkAccess: 'Enabled'
+    networkAcls: {
       defaultAction: 'Allow'
       bypass: 'AzureServices'
     }
     blobServices: {
-      containers: [{name: deploymentStorageContainerName}]
+      containers: [{ name: deploymentStorageContainerName }]
     }
-    minimumTlsVersion: 'TLS1_2'  // Enforcing TLS 1.2 for better security
+    minimumTlsVersion: 'TLS1_2'
     location: location
     tags: tags
   }
@@ -205,11 +161,11 @@ module storage 'br/public:avm/res/storage/storage-account:0.8.3' = {
 
 // Define the configuration object locally to pass to the modules
 var storageEndpointConfig = {
-  enableBlob: true  // Required for AzureWebJobsStorage, .zip deployment, Event Hubs trigger and Timer trigger checkpointing
-  enableQueue: false  // Required for Durable Functions and MCP trigger
-  enableTable: false  // Required for Durable Functions and OpenAI triggers and bindings
-  enableFiles: false   // Not required, used in legacy scenarios
-  allowUserIdentityPrincipal: true   // Allow interactive user identity to access for testing and debugging
+  enableBlob: true  // Required for AzureWebJobsStorage and .zip deployment
+  enableQueue: false
+  enableTable: false
+  enableFiles: false
+  allowUserIdentityPrincipal: false
 }
 
 // Consolidated Role Assignments
@@ -220,37 +176,11 @@ module rbac 'app/rbac.bicep' = {
     storageAccountName: storage.outputs.name
     appInsightsName: monitoring.outputs.name
     managedIdentityPrincipalId: mcpUserAssignedIdentity.outputs.principalId
-    userIdentityPrincipalId: principalId
+    userIdentityPrincipalId: ''
     enableBlob: storageEndpointConfig.enableBlob
     enableQueue: storageEndpointConfig.enableQueue
     enableTable: storageEndpointConfig.enableTable
     allowUserIdentityPrincipal: storageEndpointConfig.allowUserIdentityPrincipal
-  }
-}
-
-// Virtual Network & private endpoint to blob storage
-module serviceVirtualNetwork 'app/vnet.bicep' =  if (vnetEnabled) {
-  name: 'serviceVirtualNetwork'
-  scope: rg
-  params: {
-    location: location
-    tags: tags
-    vNetName: !empty(vNetName) ? vNetName : '${abbrs.networkVirtualNetworks}${resourceToken}'
-  }
-}
-
-module storagePrivateEndpoint 'app/storage-PrivateEndpoint.bicep' = if (vnetEnabled) {
-  name: 'servicePrivateEndpoint'
-  scope: rg
-  params: {
-    location: location
-    tags: tags
-    virtualNetworkName: !empty(vNetName) ? vNetName : '${abbrs.networkVirtualNetworks}${resourceToken}'
-    subnetName: vnetEnabled ? serviceVirtualNetwork.outputs.peSubnetName : '' // Keep conditional check for safety, though module won't run if !vnetEnabled
-    resourceName: storage.outputs.name
-    enableBlob: storageEndpointConfig.enableBlob
-    enableQueue: storageEndpointConfig.enableQueue
-    enableTable: storageEndpointConfig.enableTable
   }
 }
 
@@ -265,7 +195,7 @@ module logAnalytics 'br/public:avm/res/operational-insights/workspace:0.7.0' = {
     dataRetention: 30
   }
 }
- 
+
 module monitoring 'br/public:avm/res/insights/component:0.4.1' = {
   name: '${uniqueString(deployment().name, location)}-appinsights'
   scope: rg
