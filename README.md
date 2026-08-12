@@ -120,6 +120,57 @@ This MCP server exposes a comprehensive set of tools for managing your Ghost CMS
 
 Ghost MCP Server employs a custom `GhostError` exception to handle API communication errors and processing issues. This ensures clear and descriptive error messages to assist with troubleshooting.
 
+## Running as a remote MCP server on Azure Functions
+
+This fork can also run as a **remote MCP server** (Streamable HTTP transport) hosted on **Azure Functions** (Flex Consumption plan), following the [official Microsoft pattern](https://learn.microsoft.com/azure/azure-functions/scenario-host-mcp-server-sdks?pivots=programming-language-typescript). The Functions host runs the server as an [MCP custom handler](https://learn.microsoft.com/azure/azure-functions/self-hosted-mcp-servers): `host.json` launches `node build/index.js`, an Express app exposing the MCP endpoint at `/mcp` in stateless mode (a fresh server + transport per request).
+
+### Architecture
+
+- `src/mcpServer.ts` — `createServer()` factory registering all Ghost resources, tools and prompts (shared by both entry points).
+- `src/server.ts` — stdio entry point (local use with Claude Desktop, unchanged).
+- `src/index.ts` — HTTP entry point (Express + `StreamableHTTPServerTransport`, stateless) used by Azure Functions.
+- `host.json` — `mcp-custom-handler` configuration profile, anonymous auth at the host level (OAuth is enforced by Easy Auth, see below).
+- `infra/` — Bicep modules (azd) provisioning: Flex Consumption Function App (Node 22), storage with private endpoints + VNet, App Insights/Log Analytics, user-assigned managed identity, and an **Entra ID app registration + Easy Auth** so only authenticated Microsoft Entra users can call the MCP endpoint.
+
+### Configuration
+
+Ghost credentials are read from environment variables / app settings — never hardcoded:
+
+| Setting | Description |
+| --- | --- |
+| `GHOST_API_URL` | Base URL of your Ghost site, e.g. `https://yourblog.ghost.io` |
+| `GHOST_ADMIN_API_KEY` | Admin API key (Ghost Admin → Settings → Integrations → Add custom integration) |
+| `GHOST_API_VERSION` | API version, defaults to `v5.0` |
+
+For local development, fill these values in `local.settings.json` (dummy placeholders are committed; do **not** commit real keys).
+
+### Run locally
+
+```bash
+npm install
+npm run build
+func start   # Azure Functions Core Tools v4.5+
+```
+
+The MCP endpoint is then available at `http://localhost:7071/mcp`. `.vscode/mcp.json` contains `local-mcp-server` and `remote-mcp-server` configurations to test it from GitHub Copilot in VS Code.
+
+### Deploy to Azure
+
+Deployment uses the [Azure Developer CLI](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd) (`azd`) with the Bicep files under `infra/`:
+
+```bash
+azd auth login
+azd env new ghost-mcp-prod
+azd env set GHOST_API_URL https://yourblog.ghost.io
+azd env set GHOST_ADMIN_API_KEY <your_admin_api_key>
+azd env set PRE_AUTHORIZED_CLIENT_IDS aebc6443-996d-45c2-90f0-388ff96faa56  # pre-authorize VS Code
+azd up
+```
+
+`azd up` provisions the Flex Consumption function app, deploys the code (remote build), configures the Ghost app settings, and sets up Entra ID authentication. When it completes, note the function app name, then start the `remote-mcp-server` configuration in `.vscode/mcp.json` and enter `<your-function-app>.azurewebsites.net` when prompted.
+
+To remove all resources: `azd down`.
+
 ## Contributing
 
 1. Fork repository
