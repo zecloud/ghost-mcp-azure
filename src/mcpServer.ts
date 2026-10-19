@@ -22,10 +22,16 @@ import { registerPageTools } from "./tools/pages";
 import { registerImageTools } from "./tools/images";
 import { registerPrompts } from "./prompts";
 
+export type CreateServerOptions = {
+    // images_upload reads arbitrary paths from the local filesystem — only
+    // enable it where the server runs on the caller's own machine (stdio).
+    allowImageUpload?: boolean;
+};
+
 // Create and configure an MCP server instance with all Ghost resources,
 // tools and prompts registered. Shared by the stdio entry point (server.ts)
 // and the Azure Functions HTTP entry point (index.ts).
-export function createServer(): McpServer {
+export function createServer(options: CreateServerOptions = {}): McpServer {
     const server = new McpServer({
         name: "ghost-mcp-ts",
         version: "1.0.0", // TODO: Get version from package.json
@@ -59,7 +65,9 @@ export function createServer(): McpServer {
     registerRoleTools(server);
     registerWebhookTools(server);
     registerPageTools(server);
-    registerImageTools(server);
+    if (options.allowImageUpload) {
+        registerImageTools(server);
+    }
 
     registerPrompts(server);
 

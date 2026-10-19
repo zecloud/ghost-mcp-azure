@@ -122,11 +122,19 @@ mkdir -p "$CLAUDE_DESKTOP_DIR"
 NODE_BIN="$(command -v node)"
 [[ -n "$NODE_BIN" ]] || fatal "Cannot resolve absolute path for node — ensure Node.js is on PATH and re-run."
 
-node << NODEJS
+# Pass values via environment so paths/credentials are treated as data,
+# never as JavaScript source (quoted heredoc delimiter = no shell expansion).
+GHOST_MCP_CONFIG_PATH="$CLAUDE_DESKTOP_CONFIG" \
+GHOST_MCP_SERVER_PATH="${SCRIPT_DIR}/build/server.js" \
+GHOST_MCP_NODE_BIN="$NODE_BIN" \
+GHOST_MCP_API_URL="$GHOST_API_URL" \
+GHOST_MCP_ADMIN_API_KEY="$GHOST_ADMIN_API_KEY" \
+GHOST_MCP_API_VERSION="$GHOST_API_VERSION" \
+node << 'NODEJS'
 const fs = require('fs');
-const configPath = '${CLAUDE_DESKTOP_CONFIG}';
-const serverPath = '${SCRIPT_DIR}/build/server.js';
-const nodeBin   = '${NODE_BIN}';
+const configPath = process.env.GHOST_MCP_CONFIG_PATH;
+const serverPath = process.env.GHOST_MCP_SERVER_PATH;
+const nodeBin    = process.env.GHOST_MCP_NODE_BIN;
 
 let config = {};
 if (fs.existsSync(configPath)) {
@@ -141,9 +149,9 @@ config.mcpServers['ghost-mcp'] = {
   command: nodeBin,
   args: [serverPath],
   env: {
-    GHOST_API_URL: '${GHOST_API_URL}',
-    GHOST_ADMIN_API_KEY: '${GHOST_ADMIN_API_KEY}',
-    GHOST_API_VERSION: '${GHOST_API_VERSION}'
+    GHOST_API_URL: process.env.GHOST_MCP_API_URL,
+    GHOST_ADMIN_API_KEY: process.env.GHOST_MCP_ADMIN_API_KEY,
+    GHOST_API_VERSION: process.env.GHOST_MCP_API_VERSION
   }
 };
 
@@ -173,7 +181,7 @@ claude mcp add ghost-mcp \
   -e "GHOST_API_URL=${GHOST_API_URL}" \
   -e "GHOST_ADMIN_API_KEY=${GHOST_ADMIN_API_KEY}" \
   -e "GHOST_API_VERSION=${GHOST_API_VERSION}" \
-  -- node "$serverPath"
+  -- "$NODE_BIN" "$serverPath"
 
 success "ghost-mcp registered (user scope)"
 

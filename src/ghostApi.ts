@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { readFile } from 'fs/promises';
+import { readFile, stat } from 'fs/promises';
 import path from 'path';
 import axios, { type AxiosInstance } from 'axios';
 import { GHOST_API_URL, GHOST_ADMIN_API_KEY, GHOST_API_VERSION } from './config';
@@ -74,6 +74,9 @@ class GhostAdminClient {
     this.http = axios.create({ baseURL: `${url}/ghost/api/admin` });
     this.http.interceptors.request.use((config: any) => {
       config.headers.Authorization = `Ghost ${this._generateToken()}`;
+      // Ghost pins API behavior per request via the Accept-Version header;
+      // keep the configured GHOST_API_VERSION effective.
+      config.headers['Accept-Version'] = this.version;
       return config;
     });
 
@@ -92,11 +95,12 @@ class GhostAdminClient {
     this.images = { upload: (p) => this._uploadImage(p) };
   }
 
-  // Ghost Admin API JWT: HS256, kid in header, aud = /{version}/admin/
+  // Ghost Admin API JWT: HS256, kid in header, aud = /admin/ (unversioned —
+  // version negotiation is done via the Accept-Version request header).
   _generateToken(): string {
     const now = Math.floor(Date.now() / 1000);
     const header = Buffer.from(JSON.stringify({ alg: 'HS256', kid: this.keyId })).toString('base64url');
-    const payload = Buffer.from(JSON.stringify({ iat: now, exp: now + 300, aud: `/${this.version}/admin/` })).toString('base64url');
+    const payload = Buffer.from(JSON.stringify({ iat: now, exp: now + 300, aud: '/admin/' })).toString('base64url');
     const sig = crypto.createHmac('sha256', this.secret).update(`${header}.${payload}`).digest('base64url');
     return `${header}.${payload}.${sig}`;
   }
@@ -110,11 +114,37 @@ class GhostAdminClient {
   }
 
   async _read(resource: string, params: ReadParams): Promise<any> {
-    const { id, slug, ...rest } = params;
-    const url = id ? `/${resource}/${id}/` : slug ? `/${resource}/slug/${slug}/` : `/${resource}/`;
-    const { data } = await this.http.get(url, { params: rest });
-    const val = data[resource];
-    return Array.isArray(val) ? val[0] : val;
+    const { id, slug, fields, include, formats, ...rest } = params;
+    const query: Record<string, unknown> = {};
+    if (fields) query.fields = fields;
+    if (include) query.include = include;
+    if (formats) query.formats = formats;
+
+    if (id || slug) {
+      const url = id ? `/${resource}/${id}/` : `/${resource}/slug/${slug}/`;
+      const { data } = await this.http.get(url, { params: query });
+      const val = data[resource];
+      return Array.isArray(val) ? val[0] : val;
+    }
+
+    // Other selectors (email, code, name, ...) are not routable on the Admin
+    // API: resolve them through an exact NQL filter and require exactly one
+    // match instead of silently returning the first collection item.
+    const selectors = Object.entries(rest).filter(([, v]) => v !== undefined && v !== '');
+    if (selectors.length === 0) {
+      throw new Error(`Reading a ${resource} requires an id or a unique selector (e.g. slug, email, code, name).`);
+    }
+    const filter = selectors
+      .map(([k, v]) => `${k}:'${String(v).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`)
+      .join('+');
+    const { items } = await this._browse(resource, { ...query, filter, limit: 2 } as BrowseParams);
+    if (items.length === 0) {
+      throw new Error(`No ${resource} found matching ${filter}`);
+    }
+    if (items.length > 1) {
+      throw new Error(`Multiple ${resource} records match ${filter}; use id or a unique selector.`);
+    }
+    return items[0];
   }
 
   async _add(resource: string, body: Record<string, unknown>, options?: Record<string, string>): Promise<any> {
@@ -133,8 +163,23 @@ class GhostAdminClient {
   }
 
   async _uploadImage(params: { file: string; purpose?: string; ref?: string }): Promise<any> {
-    const buf = await readFile(params.file);
-    const ext = path.extname(params.file).toLowerCase();
+    // The local file must be a regular file of bounded size — this guard
+    // matters even in stdio mode and is a hard requirement if upload is
+    // ever exposed over HTTP (special files like /dev/zero would otherwise
+    // exhaust worker memory).
+    const filePath = path.resolve(params.file);
+    const fileStat = await stat(filePath).catch(() => {
+      throw new Error(`Image file not found: ${params.file}`);
+    });
+    if (!fileStat.isFile()) {
+      throw new Error(`Image path is not a regular file: ${params.file}`);
+    }
+    const MAX_IMAGE_BYTES = 20 * 1024 * 1024; // 20 MB
+    if (fileStat.size > MAX_IMAGE_BYTES) {
+      throw new Error(`Image file exceeds the 20 MB limit: ${params.file}`);
+    }
+    const buf = await readFile(filePath);
+    const ext = path.extname(filePath).toLowerCase();
     const mimeTypes: Record<string, string> = {
       '.jpg': 'image/jpeg',
       '.jpeg': 'image/jpeg',
@@ -143,9 +188,12 @@ class GhostAdminClient {
       '.webp': 'image/webp',
       '.svg': 'image/svg+xml',
     };
-    const mimeType = mimeTypes[ext] ?? 'application/octet-stream';
+    const mimeType = mimeTypes[ext];
+    if (!mimeType) {
+      throw new Error(`Unsupported image type '${ext}': ${params.file}`);
+    }
     const form = new FormData();
-    form.append('file', new Blob([buf], { type: mimeType }), path.basename(params.file));
+    form.append('file', new Blob([buf], { type: mimeType }), path.basename(filePath));
     if (params.purpose) form.append('purpose', params.purpose);
     if (params.ref) form.append('ref', params.ref);
     const { data } = await this.http.post('/images/upload/', form);
