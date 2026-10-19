@@ -18,6 +18,8 @@ import { registerNewsletterTools } from "./tools/newsletters";
 import { registerInviteTools } from "./tools/invites";
 import { registerRoleTools } from "./tools/roles";
 import { registerWebhookTools } from "./tools/webhooks";
+import { registerPageTools } from "./tools/pages";
+import { registerImageTools } from "./tools/images";
 import { registerPrompts } from "./prompts";
 
 // Create and configure an MCP server instance with all Ghost resources,
@@ -56,6 +58,8 @@ export function createServer(): McpServer {
     registerInviteTools(server);
     registerRoleTools(server);
     registerWebhookTools(server);
+    registerPageTools(server);
+    registerImageTools(server);
 
     registerPrompts(server);
 
