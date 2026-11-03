@@ -6,7 +6,8 @@ import './ghostApi'; // Validates Ghost configuration at startup
 
 // Set up and connect to the standard I/O transport
 async function startServer() {
-    const server = createServer();
+    // stdio runs on the user's own machine: local image upload is allowed.
+    const server = createServer({ allowImageUpload: true });
     const transport = new StdioServerTransport();
     await server.connect(transport);
     console.error("Ghost MCP TypeScript Server running on stdio"); // Log to stderr
